@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head lang="en">
+  <meta charset="UTF-8">
+  <title>{{ title }}</title>
+  <script type="text/javascript" src="//code.jquery.com/jquery-1.12.0.min.js"></script>
+  <script type="text/javascript">
+
+    $(function() {
+
+        document.body.bgColor = "red";
+
+        var ws = new WebSocket("ws://" + window.location.host + "/api");
+
+        ws.onopen = function() {
+            console.log("ws opened");
+            document.body.bgColor = "green";
+        };
+
+        ws.onclose = function() {
+            console.log("ws closed");
+            document.body.bgColor = "red";
+        };
+
+        ws.onmessage = function(event) {
+            console.log("ws message: " + event.data);
+        };
+
+        function sendAction(action, params)
+        {
+            if (params)
+            {
+                ws.send(JSON.stringify({ action: action, params: params }));
+            }
+            else
+            {
+                ws.send(JSON.stringify({ action: action }));
+            }
+        }
+
+        var keyState = {};
+
+        function update()
+        {
+            var power = parseInt($("#power").val());
+            var brake = $("#brake:checked").length > 0;
+
+            if (keyState[37] || keyState[65]) // left arrow or a
+            {
+                sendAction("turn_in_place", { power: -power });
+            }
+            else if (keyState[39] || keyState[68]) // right arrow or d
+            {
+                sendAction("turn_in_place", { power: power });
+            }
+            else if (keyState[38] || keyState[87]) // up arrow or w
+            {
+                sendAction("drive", { power: power });
+            }
+            else if (keyState[40] || keyState[83]) // down arrow or s
+            {
+                sendAction("drive", { power: -power });
+            }
+            else if (!brake)
+            {
+                sendAction("float");
+            }
+            else
+            {
+                sendAction("stop");
+            }
+        }
+
+        $(window)
+            .keydown(function(event) {
+                keyState[event.which] = true;
+                event.preventDefault();
+                update();
+            })
+            .keyup(function() {
+                keyState[event.which] = false;
+                event.preventDefault();
+                update();
+            });
+
+        $("#power").change(function() {
+            update();
+        });
+    });
+
+  </script>
+</head>
+<body>
+  <p>Use the keyboard to drive the robot</p>
+  <p>Up/W - forward, Down/S - Reverse, Left/A - turn left, Right/D - turn right</p>
+  <p>
+    Power: <input type="range" id="power" min="0" max="100" step="" value="30" />
+  </p>
+  <p>
+    <input id="brake" type="checkbox" checked /><label for="brake">Brake</label>
+  </p>
+</body>
+</html>

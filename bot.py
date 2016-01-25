@@ -138,3 +138,67 @@ class DiffDrive:
 
     def __set_power(self, motor, power):
         motor.setSpeed(self.__power_to_speed(power))
+
+
+from flask import Flask, render_template, request
+from flask.views import View
+from geventwebsocket.handler import WebSocketHandler
+from gevent.pywsgi import WSGIServer
+import json
+
+class WebRemoteServer:
+    """
+    Runs a web server that you can use to remote-control the robot
+
+    Requires [Flask](http://flask.pocoo.org/) and [gevent-websocket](https://bitbucket.org/noppo/gevent-websocket).
+
+    :param bot_driver: robot driver instance
+    """
+
+    def __init__(self, bot_driver, port=9000, title='Robot Remote'):
+        self.__title = title
+        self.__port = port
+        self.__app = Flask(__name__)
+        self.__app.add_url_rule('/', view_func=WebRemoteServer.IndexView.as_view('index', title=title))
+        self.__app.add_url_rule('/api', view_func=WebRemoteServer.ApiView.as_view('api', bot_driver=bot_driver))
+
+    def run(self):
+        #self.app.run(host='0.0.0.0', port=self.__port, debug=True)
+        print 'Server started on port %d' % (self.__port,)
+        http_server = WSGIServer(('', self.__port), self.__app, handler_class=WebSocketHandler)
+        http_server.serve_forever()
+
+    class IndexView(View):
+        def __init__(self, title):
+            self.__title = title
+
+        def dispatch_request(self):
+            print 'rendering index template'
+            return render_template('index.html', title=self.__title)
+
+    class ApiView(View):
+        def __init__(self, bot_driver):
+            self.__bot_driver = bot_driver
+
+        def dispatch_request(self):
+            print 'setting up web socket'
+            if request.environ.get('wsgi.websocket'):
+                ws = request.environ['wsgi.websocket']
+                while True:
+                    message = ws.receive()
+                    print 'ws message receieved:', message
+                    data = json.loads(message)
+
+                    if not 'action' in data:
+                        continue
+
+                    action = data['action']
+
+                    if action == 'drive':
+                        self.__bot_driver.drive(power=data['params']['power'], wait=False)
+                    elif action == 'turn_in_place':
+                        self.__bot_driver.turn_in_place(power=data['params']['power'], wait=False)
+                    elif action == 'stop':
+                        self.__bot_driver.stop()
+                    elif action == 'float':
+                        self.__bot_driver.float()
