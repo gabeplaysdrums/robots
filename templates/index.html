@@ -4,6 +4,11 @@
   <meta charset="UTF-8">
   <title>{{ title }}</title>
   <script type="text/javascript" src="//code.jquery.com/jquery-1.12.0.min.js"></script>
+  <style type="text/css">
+    #canvas {
+      border: 1px solid black;
+    }
+  </style>
   <script type="text/javascript">
 
     $(function() {
@@ -11,6 +16,9 @@
         document.body.bgColor = "red";
 
         var ws = new WebSocket("ws://" + window.location.host + "/api");
+        var pose = null;
+        var confidence = 0;
+        var path = [];
 
         ws.onopen = function() {
             console.log("ws opened");
@@ -23,7 +31,19 @@
         };
 
         ws.onmessage = function(event) {
-            console.log("ws message: " + event.data);
+            var message = JSON.parse(event.data)
+            console.debug("ws message: " + JSON.stringify(message));
+
+            if (message["action"] === "locator_update")
+            {
+                pose = message["pose"];
+                confidence = message["confidence"];
+                render();
+            }
+            else if (message["action"] === "path_update")
+            {
+                path = message["path"];
+            }
         };
 
         function sendAction(action, params)
@@ -86,6 +106,55 @@
         $("#power").change(function() {
             update();
         });
+
+        var PIXELS_PER_METER = 100;
+        var canvas = $("#canvas").get(0);
+        var ctx = canvas.getContext("2d");
+
+        $("#canvas").click(function(event) {
+            var x = (event.pageX - $(this).offset().left - canvas.width / 2) / PIXELS_PER_METER;
+            var y = (canvas.height / 2 - (event.pageY - $(this).offset().top)) / PIXELS_PER_METER;
+            path.push([x, y]);
+            sendAction("set_path", { path: path });
+        });
+
+        function render()
+        {
+            if (pose)
+            {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.save();
+
+                var x = canvas.width / 2 + pose[0] * PIXELS_PER_METER;
+                var y = canvas.height / 2 - pose[1] * PIXELS_PER_METER;
+
+                ctx.translate(x, y);
+                ctx.rotate(-pose[2] * Math.PI / 180);
+
+                ctx.beginPath();
+                ctx.moveTo(0, 5);
+                ctx.lineTo(20, 0);
+                ctx.lineTo(0, -5);
+                ctx.lineTo(0, 5);
+                ctx.fillStyle = "blue";
+                ctx.fill();
+                ctx.closePath();
+
+                ctx.restore();
+                ctx.moveTo(x, y);
+
+                for (var i=0; i < path.length; i++)
+                {
+                    var target_x = canvas.width / 2 + path[i][0] * PIXELS_PER_METER;
+                    var target_y = canvas.height / 2 - path[i][1] * PIXELS_PER_METER;
+                    ctx.lineTo(target_x, target_y);
+                }
+
+                ctx.strokeStyle = "blue";
+                ctx.stroke();
+                ctx.closePath();
+            }
+        }
     });
 
   </script>
@@ -99,5 +168,6 @@
   <p>
     <input id="brake" type="checkbox" checked /><label for="brake">Brake</label>
   </p>
+  <canvas id="canvas" width="800" height="600" />
 </body>
 </html>
