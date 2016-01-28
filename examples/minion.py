@@ -5,7 +5,7 @@ DiffDrive robot example
 
 from PiStorms import PiStorms
 import bot
-import time
+import requests
 
 psm = PiStorms()
 
@@ -18,30 +18,42 @@ desc = bot.DiffDescription(
 )
 
 driver = bot.DiffDriver(desc)
-
-"""
-# drive in a square
-for i in range(4):
-    d.drive(power=50, distance=0.75)
-    d.stop()
-    d.turn_in_place(power=15, degrees=90)
-    d.stop()
-"""
-
 #locator = bot.DiffLocator(desc)
 locator = bot.RemoteLocator()
-
 path_follower = bot.PathFollower(driver, locator)
+remote = bot.RemoteControl(driver, title='Minion Remote', locator=locator, path_follower=path_follower)
 
-remote = bot.WebRemoteServer(driver, title='Minion Remote', locator=locator, path_follower=path_follower, screen=psm.screen)
-remote.run(async=True)
+server = bot.WebServer(9000, screen=psm.screen, plugins=(
+    remote,
+    locator,
+))
+server.run(async=True)
 
-done = False
+registered = False
 
-while not done:
-    time.sleep(1)
+try:
+    resp = requests.get('http://gabey-dev:9000/register/robot')
+    if resp and resp.status_code == 200:
+        registered = True
+except:
+    pass
+
+if registered:
+    psm.screen.termPrintln('registered successfully')
+else:
+    psm.screen.termPrintln('failed to register')
+
+print 'starting event loop'
+
+event_loop = bot.EventLoop(processors=(
+    remote,
+    path_follower,
+))
+
+while True:
     if psm.isKeyPressed():
-        done = True
+        break
+    event_loop.step()
 
 driver.float()
 

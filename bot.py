@@ -98,6 +98,7 @@ class DiffDescription:
     def right_pos(self):
         return self.forward_coeff * self.right_motor.pos()
 
+
 class DiffDriver(BotDriver):
     """
     Differential drive robot driver
@@ -106,6 +107,7 @@ class DiffDriver(BotDriver):
     """
 
     def __init__(self, desc):
+        super(DiffDriver, self).__init__()
         self.__desc = desc
 
     def drive(self, power=30, distance=None, turn_radius=0, wait=True):
@@ -205,6 +207,48 @@ class DiffDriver(BotDriver):
         motor.setSpeed(self.__power_to_speed(power))
 
 
+class EventLoopProcessor:
+    """
+    Runs code in the event loop
+    """
+    __metaclass__ = ABCMeta
+
+    def __init__(self):
+        pass
+
+    @abstractmethod
+    def update(self):
+        """
+        :returns Whether the event loop should continue updating other processors
+        """
+        pass
+
+
+class EventLoop:
+    """
+    Defines and runs a prioritized event loop
+
+    :param processors: list of `EventLoopProcessor` instances to be updates on each iteraton of the loop in order
+    """
+    def __init__(self, processors=()):
+        self.__processors = processors
+
+    def step(self):
+        """
+        Executes one iteration of the event loop
+        """
+        for processor in self.__processors:
+            if processor.update():
+                break
+
+    def run_forever(self):
+        """
+        Runs the event loop forever until the applicaton terminates
+        """
+        while True:
+            self.step()
+
+
 from flask import Flask, render_template, request
 from flask.views import View
 from geventwebsocket.handler import WebSocketHandler
@@ -213,125 +257,246 @@ import json
 import threading
 
 
-class WebRemoteServer:
+class WebServer:
     """
-    Runs a web server that you can use to remote-control the robot
+    Basic web server with WebSocket support
 
     Requires [Flask](http://flask.pocoo.org/) and [gevent-websocket](https://bitbucket.org/noppo/gevent-websocket).
-
-    :param bot_driver: `BotDriver` instance
-    :param port: server port
-    :param title: page title
     """
 
-    def __init__(self, bot_driver, port=9000, title='Robot Remote', locator=None, path_follower=None, screen=None):
-        self.__title = title
+    def __init__(self, port=9000, screen=None, plugins=()):
+        self.__ip_address = None
         self.__port = port
         self.__screen = screen
-
         self.__app = Flask(__name__)
-        self.__app.add_url_rule('/', view_func=WebRemoteServer.IndexView.as_view('index', title=title))
-        self.__app.add_url_rule('/api', view_func=WebRemoteServer.ApiView.as_view(
-            'api',
-            bot_driver=bot_driver,
-            locator=locator,
-            path_follower=path_follower))
+
+        for plugin in plugins:
+            plugin.configure(self.__app)
+
+    @property
+    def ip_address(self):
+        return self.__ip_address
 
     def run(self, async=False):
-        """
-        Run the web server
-
-        :param async: if True, server will start on a separate thread
-        """
-
-        def run_server(port, app, screen):
+        def run_server(port, app, screen, start_event):
             #self.app.run(host='0.0.0.0', port=self.__port, debug=True)
             http_server = WSGIServer(('', port), app, handler_class=WebSocketHandler)
 
-            if screen:
-                # get public IP address
-                import socket
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(('microsoft.com', 80))
-                ip_address = s.getsockname()[0]
-                s.close()
+            # get public IP address
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('microsoft.com', 80))
+            ip_address = s.getsockname()[0]
+            s.close()
 
+            self.__ip_address = ip_address
+
+            if screen:
                 screen.termPrintln('Server started.')
                 screen.termPrintln('Connect at:')
                 screen.termPrintln('http://%s:%d' % (ip_address, port))
                 screen.termPrintln(' ')
 
-            print 'Server started on port %d' % (port,)
+            print 'Server started.  Connect at http://%s:%d' % (ip_address, port)
+            start_event.set()
             http_server.serve_forever()
 
-        server_thread = threading.Thread(target=run_server, args=(self.__port, self.__app, self.__screen))
+        start_event = threading.Event()
+        server_thread = threading.Thread(target=run_server, args=(self.__port, self.__app, self.__screen, start_event))
         server_thread.daemon = True
         server_thread.start()
+        start_event.wait()
 
         if not async:
             server_thread.join()
+
+
+class WebServerPlugin:
+
+    __metaclass__ = ABCMeta
+
+    def __init__(self):
+        pass
+
+    @abstractmethod
+    def configure(self, app):
+        """
+        Configure the web server
+        :param app: the web server's `Flask` app instance
+        """
+        pass
+
+    class WebSocketView(View):
+        __metaclass__ = ABCMeta
+
+        def __init__(self):
+            self.__clients = set()
+            self.__lock = threading.Lock()
+
+        @abstractmethod
+        def connected(self, ws):
+            pass
+
+        @abstractmethod
+        def message_recv(self, ws, message):
+            pass
+
+        def dispatch_request(self):
+            print 'setting up web socket'
+            try:
+                if request.environ.get('wsgi.websocket'):
+                    ws = request.environ['wsgi.websocket']
+                    self.connected(ws)
+                    with self.__lock:
+                        self.__clients.add(ws)
+
+                    while True:
+                        try:
+                            message = ws.receive()
+                        except:
+                            break
+                        self.message_recv(ws, message)
+
+                    with self.__lock:
+                        self.__clients.remove(ws)
+            except Exception, e:
+                print 'ERROR:', e.message
+
+        def broadcast(self, message):
+            with self.__lock:
+                for ws in self.__clients:
+                    try:
+                        ws.send(message)
+                    except:
+                        pass
+
+        @classmethod
+        def as_view(cls, name, *class_args, **class_kwargs):
+            """
+            We override View's as_view method so we can construct the view class once
+            """
+
+            self = cls(*class_args, **class_kwargs)
+
+            def view(*args, **kwargs):
+                return self.dispatch_request(*args, **kwargs)
+
+            if cls.decorators:
+                view.__name__ = name
+                view.__module__ = cls.__module__
+                for decorator in cls.decorators:
+                    view = decorator(view)
+
+            # We attach the view class to the view function for two reasons:
+            # first of all it allows us to easily figure out what class-based
+            # view this thing came from, secondly it's also used for instantiating
+            # the view class so you can actually replace it with something else
+            # for testing purposes and debugging.
+            view.view_class = cls
+            view.view_class_instance = self
+            view.__name__ = name
+            view.__doc__ = cls.__doc__
+            view.__module__ = cls.__module__
+            view.methods = cls.methods
+
+            return view
+
+
+class RemoteControl(WebServerPlugin, EventLoopProcessor):
+    """
+    Enables remote control of the robot from a web browser
+
+    :param bot_driver: `BotDriver` instance
+    :param title: page title
+    :param locator: locator used to report robot pose periodically
+    :param path_follower: path follower used to follow user-provided paths
+    :param broadcast_interval: time between broadcasts of state updates in seconds
+    """
+
+    def __init__(self, bot_driver, title='Robot Remote', locator=None, path_follower=None, broadcast_interval=0.250):
+        WebServerPlugin.__init__(self)
+        EventLoopProcessor.__init__(self)
+        self.__title = title
+        self.__api_view = RemoteControl.ApiView.as_view(
+            'api_remote',
+            bot_driver=bot_driver,
+            locator=locator,
+            path_follower=path_follower,
+            broadcast_interval=broadcast_interval)
+
+    def configure(self, app):
+        app.add_url_rule('/', view_func=RemoteControl.IndexView.as_view('index', title=self.__title))
+        app.add_url_rule('/api/remote', view_func=self.__api_view)
+
+    def update(self):
+        self.__api_view.view_class_instance.update()
 
     class IndexView(View):
         def __init__(self, title):
             self.__title = title
 
         def dispatch_request(self):
-            print 'rendering index template'
+            print 'remote control client connected'
             return render_template('index.html', title=self.__title)
 
-    class ApiView(View):
-        def __init__(self, bot_driver, locator, path_follower):
+    class ApiView(WebServerPlugin.WebSocketView):
+        def __init__(self, bot_driver, locator, path_follower, broadcast_interval):
+            super(RemoteControl.ApiView, self).__init__()
             self.__bot_driver = bot_driver
             self.__locator = locator
             self.__path_follower = path_follower
+            self.__broadcast_interval = broadcast_interval
+            self.__broadcast_time = None
 
-        def dispatch_request(self):
-            print 'setting up web socket'
-            if request.environ.get('wsgi.websocket'):
-                ws = request.environ['wsgi.websocket']
+        def connected(self, ws):
+            for message in self.get_state_update_messages():
+                ws.send(message)
 
-                if self.__locator is not None:
+        def message_recv(self, ws, message):
+            data = json.loads(message)
 
-                    def locator_thread_func(ws, locator):
-                        while True:
-                            time.sleep(0.250)
+            if data is None or not 'action' in data:
+                return
 
-                            (pose, confidence) = locator.locate()
+            action = data['action']
 
-                            ws.send(json.dumps({
-                                'action': 'locator_update',
-                                'pose': pose,
-                                'confidence': confidence
-                            }))
+            if action == 'drive':
+                self.__bot_driver.drive(power=data['params']['power'], wait=False)
+            elif action == 'turn_in_place':
+                self.__bot_driver.turn_in_place(power=data['params']['power'], wait=False)
+            elif action == 'stop':
+                self.__bot_driver.stop()
+            elif action == 'float':
+                self.__bot_driver.float()
+            elif action == 'set_path':
+                if self.__path_follower is not None:
+                    self.__path_follower.path = data['params']['path']
 
-                            if self.__path_follower is not None:
-                                ws.send(json.dumps({
-                                    'action': 'path_update',
-                                    'path': self.__path_follower.get_path()
-                                }))
+        def update(self):
+            now = time.time()
+            if self.__broadcast_time is None or (now - self.__broadcast_time) > self.__broadcast_interval:
+                for message in self.get_state_update_messages():
+                    self.broadcast(message)
+                self.__broadcast_time = now
 
-                    locator_thread = threading.Thread(target=locator_thread_func, args=(ws, self.__locator))
-                    locator_thread.daemon = True
-                    locator_thread.start()
+        def get_state_update_messages(self):
+            messages = []
 
-                while True:
-                    message = ws.receive()
-                    #print 'ws message receieved:', message
-                    data = json.loads(message)
+            if self.__locator:
+                (pose, confidence) = self.__locator.locate()
+                messages.append(json.dumps({
+                    'action': 'locator_update',
+                    'pose': pose,
+                    'confidence': confidence
+                }))
 
-                    action = data['action']
+            if self.__path_follower:
+                messages.append(json.dumps({
+                    'action': 'path_update',
+                    'path': self.__path_follower.path
+                }))
 
-                    if action == 'drive':
-                        self.__bot_driver.drive(power=data['params']['power'], wait=False)
-                    elif action == 'turn_in_place':
-                        self.__bot_driver.turn_in_place(power=data['params']['power'], wait=False)
-                    elif action == 'stop':
-                        self.__bot_driver.stop()
-                    elif action == 'float':
-                        self.__bot_driver.float()
-                    elif action == 'set_path':
-                        if self.__path_follower is not None:
-                            self.__path_follower.set_path(data['params']['path'])
+            return messages
 
 
 class Locator:
@@ -357,170 +522,138 @@ class Locator:
         pass
 
 
-class DiffLocator(Locator):
+class DiffLocator(Locator, EventLoopProcessor):
     """
-    Attempts to estimate current pose of a differential drive robot by monitoring motor tachometers
+    Estimates pose of a differential drive robot by monitoring motor tachometers
 
     :param desc: `DiffDescription` instance
     """
 
     def __init__(self, desc):
+        Locator.__init__(self)
+        EventLoopProcessor.__init__(self)
         self.__desc = desc
         self.__pose = (0, 0, 0)
         self.__confidence = 1
         self.__left_pos = desc.left_pos()
         self.__right_pos = desc.right_pos()
-        self.__lock = threading.Lock()
-
-        self_weak = weakref.ref(self)
-        worker = threading.Thread(target=DiffLocator.__thread_func, args=(self_weak,))
-        worker.daemon = True
-        worker.start()
 
     def locate(self):
-        with self.__lock:
-            return self.__pose, self.__confidence
+        return self.__pose, self.__confidence
 
     @staticmethod
-    def __thread_func(self_weak):
+    def update(self):
 
-        while True:
-            self = self_weak()
+        # get previous values
+        prev_x, prev_y, prev_theta = self.__pose
+        prev_confidence = self.__confidence
+        prev_left_pos = self.__left_pos
+        prev_right_pos = self.__right_pos
 
-            if self is None:
-                break
+        left_pos = self.__desc.left_pos()
+        right_pos = self.__desc.right_pos()
 
-            # do work
+        # change in motor positions
+        left_pos_delta = left_pos - prev_left_pos
+        right_pos_delta = right_pos - prev_right_pos
 
-            # get previous values
-            with self.__lock:
-                prev_x, prev_y, prev_theta = self.__pose
-                prev_confidence = self.__confidence
-                prev_left_pos = self.__left_pos
-                prev_right_pos = self.__right_pos
+        if not (left_pos_delta == 0 and right_pos_delta == 0):
 
-            left_pos = self.__desc.left_pos()
-            right_pos = self.__desc.right_pos()
-
-            # change in motor positions
-            left_pos_delta = left_pos - prev_left_pos
-            right_pos_delta = right_pos - prev_right_pos
-
-            if not (left_pos_delta == 0 and right_pos_delta == 0):
-
-                if left_pos_delta == right_pos_delta:
-                    # straight
-                    x_local = DEG_TO_RAD * left_pos_delta * self.__desc.wheel_radius
-                    y_local = 0
-                    theta_delta_rad = 0
+            if left_pos_delta == right_pos_delta:
+                # straight
+                x_local = DEG_TO_RAD * left_pos_delta * self.__desc.wheel_radius
+                y_local = 0
+                theta_delta_rad = 0
+            else:
+                # turn
+                turn_radius = self.__desc.axel_radius * float(right_pos_delta + left_pos_delta) / (right_pos_delta - left_pos_delta)
+                left_pos_delta_rad = DEG_TO_RAD * left_pos_delta
+                right_pos_delta_rad = DEG_TO_RAD * right_pos_delta
+                if turn_radius == self.__desc.axel_radius:
+                    theta_delta_rad = self.__desc.wheel_radius * right_pos_delta_rad / (turn_radius + self.__desc.axel_radius)
                 else:
-                    # turn
-                    turn_radius = self.__desc.axel_radius * float(right_pos_delta + left_pos_delta) / (right_pos_delta - left_pos_delta)
-                    left_pos_delta_rad = DEG_TO_RAD * left_pos_delta
-                    right_pos_delta_rad = DEG_TO_RAD * right_pos_delta
-                    if turn_radius == self.__desc.axel_radius:
-                        theta_delta_rad = self.__desc.wheel_radius * right_pos_delta_rad / (turn_radius + self.__desc.axel_radius)
-                    else:
-                        theta_delta_rad = self.__desc.wheel_radius * left_pos_delta_rad / (turn_radius - self.__desc.axel_radius)
-                    x_local = turn_radius * math.sin(theta_delta_rad)
-                    y_local = turn_radius - turn_radius * math.cos(theta_delta_rad)
+                    theta_delta_rad = self.__desc.wheel_radius * left_pos_delta_rad / (turn_radius - self.__desc.axel_radius)
+                x_local = turn_radius * math.sin(theta_delta_rad)
+                y_local = turn_radius - turn_radius * math.cos(theta_delta_rad)
 
-                def matmult(a,b):
-                    zip_b = zip(*b)
-                    # uncomment next line if python 3 :
-                    # zip_b = list(zip_b)
-                    return [[sum(ele_a*ele_b for ele_a, ele_b in zip(row_a, col_b))
-                             for col_b in zip_b] for row_a in a]
+            def matmult(a,b):
+                zip_b = zip(*b)
+                # uncomment next line if python 3 :
+                # zip_b = list(zip_b)
+                return [[sum(ele_a*ele_b for ele_a, ele_b in zip(row_a, col_b))
+                         for col_b in zip_b] for row_a in a]
 
-                prev_theta_rad = DEG_TO_RAD * prev_theta
+            prev_theta_rad = DEG_TO_RAD * prev_theta
 
-                v_local = [ [x_local], [y_local], [1.0] ]
-                m_rotate = [
-                    [ math.cos(prev_theta_rad), math.sin(prev_theta_rad), 0 ],
-                    [ -math.sin(prev_theta_rad), math.cos(prev_theta_rad), 0 ],
-                    [ 0, 0, 1.0 ]
-                ]
-                m_translate = [
-                    [ 1.0, 0, prev_x ],
-                    [ 0, 1.0, prev_y ],
-                    [ 0, 0, 1.0 ]
-                ]
+            v_local = [ [x_local], [y_local], [1.0] ]
+            m_rotate = [
+                [ math.cos(prev_theta_rad), math.sin(prev_theta_rad), 0 ],
+                [ -math.sin(prev_theta_rad), math.cos(prev_theta_rad), 0 ],
+                [ 0, 0, 1.0 ]
+            ]
+            m_translate = [
+                [ 1.0, 0, prev_x ],
+                [ 0, 1.0, prev_y ],
+                [ 0, 0, 1.0 ]
+            ]
 
-                v_world = matmult(m_translate, matmult(m_rotate, v_local))
+            v_world = matmult(m_translate, matmult(m_rotate, v_local))
 
-                theta = prev_theta + RAD_TO_DEG * theta_delta_rad
-                x = v_world[0][0]
-                y = v_world[1][0]
+            theta = prev_theta + RAD_TO_DEG * theta_delta_rad
+            x = v_world[0][0]
+            y = v_world[1][0]
 
-                confidence = prev_confidence * 0.8
+            confidence = prev_confidence * 0.8
 
-                with self.__lock:
-                    self.__pose = (x, y, theta)
-                    self.__confidence = confidence
-                    self.__left_pos = left_pos
-                    self.__right_pos = right_pos
-
-            del self
-            time.sleep(0.100)
+            self.__pose = (x, y, theta)
+            self.__confidence = confidence
+            self.__left_pos = left_pos
+            self.__right_pos = right_pos
 
 
-class RemoteLocator(Locator):
+class RemoteLocator(Locator, WebServerPlugin):
     """
     Gets current location from a remote device using a web server
     """
 
-    def __init__(self, port=9001):
-        self.__port = port
-        self.__app = Flask(__name__)
+    def __init__(self):
+        Locator.__init__(self)
+        WebServerPlugin.__init__(self)
         self.__lock = threading.Lock()
         self.__pose = (0, 0, 0)
 
+    def configure(self, app):
         def set_pose(pose):
             with self.__lock:
                 self.__pose = pose
 
-        self.__app.add_url_rule('/api', view_func=RemoteLocator.ApiView.as_view('api', set_pose=set_pose))
-
-        def server_thread_func(port, app):
-            http_server = WSGIServer(('', port), app, handler_class=WebSocketHandler)
-            print 'Started remote locator server on port %d' % (port,)
-            http_server.serve_forever()
-
-        server_thread = threading.Thread(target=server_thread_func, args=(self.__port, self.__app))
-        server_thread.daemon = True
-        server_thread.start()
+        app.add_url_rule('/api/locator', view_func=RemoteLocator.ApiView.as_view('api_locator', set_pose=set_pose))
 
     def locate(self):
         with self.__lock:
             return self.__pose, 1
 
-    class ApiView(View):
+    class ApiView(WebServerPlugin.WebSocketView):
         def __init__(self, set_pose):
+            super(RemoteLocator.ApiView, self).__init__()
             self.__set_pose = set_pose
 
-        def dispatch_request(self):
-            print 'setting up web socket'
-            if request.environ.get('wsgi.websocket'):
-                ws = request.environ['wsgi.websocket']
+        def connected(self, ws):
+            pass
 
-                try:
-                    while True:
-                        message = ws.receive()
-                        #print 'RemoteLocator message:', message
+        def message_recv(self, ws, message):
+            data = json.loads(message)
 
-                        if not message:
-                            continue
+            if not data or not 'action' in data:
+                return
 
-                        data = json.loads(message)
-                        action = data['action']
+            action = data['action']
 
-                        if action == 'set_pose':
-                            self.__set_pose(data['pose'])
-                except Exception, e:
-                    print 'ERROR:', e.message
+            if action == 'set_pose':
+                self.__set_pose(data['pose'])
 
 
-class PathFollower:
+class PathFollower(EventLoopProcessor):
     """
     Drives the robot along the given path
 
@@ -530,6 +663,7 @@ class PathFollower:
     """
 
     def __init__(self, bot_driver, locator, distance_tolerance=0.05, heading_tolerance=10, forward_power=50, turn_power=30):
+        super(PathFollower, self).__init__()
         self.__bot_driver = bot_driver
         self.__locator = locator
         self.__distance_tolerance = distance_tolerance
@@ -539,13 +673,13 @@ class PathFollower:
         self.__path = []
         self.__lock = threading.Lock()
 
-        self_weak = weakref.ref(self)
+    @property
+    def path(self):
+        with self.__lock:
+            return self.__path[:]
 
-        thread = threading.Thread(target=PathFollower.__update_thread_func, args=(self_weak,))
-        thread.daemon = True
-        thread.start()
-
-    def set_path(self, path):
+    @path.setter
+    def path(self, path):
         """
         Set target path
         :param path: list of (x, y) pairs that the robot should drive to in order
@@ -554,51 +688,40 @@ class PathFollower:
             print 'new path: ', path
             self.__path = path
 
-    def clear_path(self):
+    def update(self):
         with self.__lock:
-            self.__path = []
+            if self.__path:
+                (x_dest, y_dest) = self.__path[0]
+                (x, y, theta), confidence = self.__locator.locate()
+                dx = x_dest - x
+                dy = y_dest - y
 
-    def get_path(self):
-        with self.__lock:
-            return self.__path[:]
+                dist = math.sqrt(dx*dx + dy*dy)
 
-    @staticmethod
-    def __update_thread_func(self_weak):
-        while True:
-            self = self_weak()
-            with self.__lock:
-                if self.__path:
-                    (x_dest, y_dest) = self.__path[0]
-                    (x, y, theta), confidence = self.__locator.locate()
-                    dx = x_dest - x
-                    dy = y_dest - y
+                if dist < self.__distance_tolerance:
+                    print 'destination reached: ', (x_dest, y_dest)
+                    self.__bot_driver.float()
+                    time.sleep(0.250)
+                    del self.__path[0]
+                    return
 
-                    dist = math.sqrt(dx*dx + dy*dy)
+                theta_dest = RAD_TO_DEG * math.atan2(dy, dx)
 
-                    if dist < self.__distance_tolerance:
-                        print 'destination reached: ', (x_dest, y_dest)
-                        self.__bot_driver.float()
-                        time.sleep(0.250)
-                        del self.__path[0]
-                        continue
+                def canonical_angle(degrees):
+                    while degrees >= 180:
+                        degrees -= 360
+                    while degrees < -180:
+                        degrees += 360
+                    return degrees
 
-                    theta_dest = RAD_TO_DEG * math.atan2(dy, dx)
+                dtheta = canonical_angle(canonical_angle(theta_dest) - canonical_angle(theta))
 
-                    def canonical_angle(degrees):
-                        while degrees >= 180:
-                            degrees -= 360
-                        while degrees < -180:
-                            degrees += 360
-                        return degrees
-
-                    dtheta = canonical_angle(canonical_angle(theta_dest) - canonical_angle(theta))
-
-                    if dtheta < -self.__heading_tolerance:
-                        # turn right
-                        self.__bot_driver.turn_in_place(power=self.__turn_power)
-                    elif dtheta > self.__heading_tolerance:
-                        # turn left
-                        self.__bot_driver.turn_in_place(power=-self.__turn_power)
-                    else:
-                        # drive forward
-                        self.__bot_driver.drive(power=self.__forward_power)
+                if dtheta < -self.__heading_tolerance:
+                    # turn right
+                    self.__bot_driver.turn_in_place(power=self.__turn_power)
+                elif dtheta > self.__heading_tolerance:
+                    # turn left
+                    self.__bot_driver.turn_in_place(power=-self.__turn_power)
+                else:
+                    # drive forward
+                    self.__bot_driver.drive(power=self.__forward_power)
