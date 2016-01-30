@@ -19,6 +19,7 @@
         var pose = null;
         var confidence = 0;
         var path = [];
+        var voxels = null;
 
         ws.onopen = function() {
             console.log("ws opened");
@@ -43,6 +44,10 @@
             else if (message["action"] === "path_update")
             {
                 path = message["path"];
+            }
+            else if (message["action"] === "voxels_update")
+            {
+                voxels = message["voxels"];
             }
         };
 
@@ -107,22 +112,73 @@
             update();
         });
 
+        $("#clear_path").click(function() {
+            sendAction("set_path", { path: [] });
+            path = []
+        });
+
         var PIXELS_PER_METER = 100;
         var canvas = $("#canvas").get(0);
         var ctx = canvas.getContext("2d");
 
         $("#canvas").click(function(event) {
+
             var x = (event.pageX - $(this).offset().left - canvas.width / 2) / PIXELS_PER_METER;
             var y = (canvas.height / 2 - (event.pageY - $(this).offset().top)) / PIXELS_PER_METER;
-            path.push([x, y]);
-            sendAction("set_path", { path: path });
+
+            if ($("#set_target:checked").length > 0)
+            {
+                // set target location for path finder
+                sendAction("set_target", { target: [ x, y ] });
+            }
+            else
+            {
+                // append to existing path
+                path.push([x, y]);
+                sendAction("set_path", { path: path });
+            }
+
         });
 
         function render()
         {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // draw voxels
+
+            if (voxels)
+            {
+                ctx.fillStyle = "black";
+
+                for (var i=0; i < voxels.grid.length; i++)
+                {
+                    for (var j=0; j < voxels.grid[0].length; j++)
+                    {
+                        if (voxels.grid[i][j] > 0)
+                        {
+                            ctx.fillStyle = "lightgray";
+                        }
+                        else
+                        {
+                            ctx.fillStyle = "black";
+                        }
+
+                        var x = voxels.offset[0] + voxels.scale * i;
+                        var y = voxels.offset[1] + voxels.scale * j;
+
+                        ctx.fillRect(
+                            canvas.width / 2 + x * PIXELS_PER_METER,
+                            canvas.height / 2 - y * PIXELS_PER_METER,
+                            voxels.scale * PIXELS_PER_METER,
+                            voxels.scale * PIXELS_PER_METER);
+                    }
+                }
+            }
+
+            // draw pose
+
             if (pose)
             {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
                 ctx.save();
 
                 var x = canvas.width / 2 + pose[0] * PIXELS_PER_METER;
@@ -141,19 +197,22 @@
                 ctx.closePath();
 
                 ctx.restore();
-                ctx.moveTo(x, y);
-
-                for (var i=0; i < path.length; i++)
-                {
-                    var target_x = canvas.width / 2 + path[i][0] * PIXELS_PER_METER;
-                    var target_y = canvas.height / 2 - path[i][1] * PIXELS_PER_METER;
-                    ctx.lineTo(target_x, target_y);
-                }
-
-                ctx.strokeStyle = "blue";
-                ctx.stroke();
-                ctx.closePath();
             }
+
+            // draw path
+
+            ctx.moveTo(x, y);
+
+            for (var i=0; i < path.length; i++)
+            {
+                var target_x = canvas.width / 2 + path[i][0] * PIXELS_PER_METER;
+                var target_y = canvas.height / 2 - path[i][1] * PIXELS_PER_METER;
+                ctx.lineTo(target_x, target_y);
+            }
+
+            ctx.strokeStyle = "blue";
+            ctx.stroke();
+            ctx.closePath();
         }
     });
 
@@ -168,6 +227,17 @@
   <p>
     <input id="brake" type="checkbox" checked /><label for="brake">Brake</label>
   </p>
-  <canvas id="canvas" width="800" height="600" />
+  <p>
+    <input id="clear_path" type="button" value="Clear Path" />
+    <input id="set_target" type="checkbox" /><label for="set_target">Set target location on click</label>
+  </p>
+  <canvas id="canvas" width="800" height="600"></canvas>
+  <h3>Upload Config Blob</h3>
+  <form action="/config/blob" method="post" enctype="multipart/form-data">
+    <p>
+      <input type="file" name="file" />
+      <input type="submit" value="Upload" />
+    </p>
+  </form>
 </body>
 </html>

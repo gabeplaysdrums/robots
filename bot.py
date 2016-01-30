@@ -85,6 +85,7 @@ class DiffDescription:
     :param wheel_radius: radius of each of the two drive wheels in meters
     :param reverse_forward: negate motor speeds (set to True if your robot is driving backwards instead of forward)
     """
+
     def __init__(self, left_motor, right_motor, axel_radius=0.1, wheel_radius=0.05, reverse_forward=False):
         self.left_motor = left_motor
         self.right_motor = right_motor
@@ -171,8 +172,10 @@ class DiffDriver(BotDriver):
             self.__desc.right_motor.setSpeed(self.__power_to_speed(-power))
         else:
             motor_degrees = int(self.__desc.axel_radius * degrees / self.__desc.wheel_radius)
-            self.__desc.left_motor.runDegs(self.__desc.forward_coeff * motor_degrees, self.__power_to_speed(power), True, True)
-            self.__desc.right_motor.runDegs(self.__desc.forward_coeff * -motor_degrees, self.__power_to_speed(power), True, True)
+            self.__desc.left_motor.runDegs(self.__desc.forward_coeff * motor_degrees, self.__power_to_speed(power),
+                                           True, True)
+            self.__desc.right_motor.runDegs(self.__desc.forward_coeff * -motor_degrees, self.__power_to_speed(power),
+                                            True, True)
 
             if wait:
                 self.__desc.left_motor.waitUntilNotBusy()
@@ -230,6 +233,7 @@ class EventLoop:
 
     :param processors: list of `EventLoopProcessor` instances to be updates on each iteraton of the loop in order
     """
+
     def __init__(self, processors=()):
         self.__processors = processors
 
@@ -249,7 +253,7 @@ class EventLoop:
             self.step()
 
 
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, send_from_directory
 from flask.views import View
 from geventwebsocket.handler import WebSocketHandler
 from gevent.pywsgi import WSGIServer
@@ -279,11 +283,12 @@ class WebServer:
 
     def run(self, async=False):
         def run_server(port, app, screen, start_event):
-            #self.app.run(host='0.0.0.0', port=self.__port, debug=True)
+            # self.app.run(host='0.0.0.0', port=self.__port, debug=True)
             http_server = WSGIServer(('', port), app, handler_class=WebSocketHandler)
 
             # get public IP address
             import socket
+
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(('microsoft.com', 80))
             ip_address = s.getsockname()[0]
@@ -312,7 +317,6 @@ class WebServer:
 
 
 class WebServerPlugin:
-
     __metaclass__ = ABCMeta
 
     def __init__(self):
@@ -326,7 +330,44 @@ class WebServerPlugin:
         """
         pass
 
-    class WebSocketView(View):
+    class BaseView(View):
+        def __init__(self):
+            pass
+
+        @classmethod
+        def as_view(cls, name, *class_args, **class_kwargs):
+            """
+            We override View's as_view method so we can construct the view class once
+            """
+
+            self = cls(*class_args, **class_kwargs)
+
+            def view(*args, **kwargs):
+                return self.dispatch_request(*args, **kwargs)
+
+            if cls.decorators:
+                view.__name__ = name
+                view.__module__ = cls.__module__
+                for decorator in cls.decorators:
+                    view = decorator(view)
+
+            # We attach the view class to the view function for two reasons:
+            # first of all it allows us to easily figure out what class-based
+            # view this thing came from, secondly it's also used for instantiating
+            # the view class so you can actually replace it with something else
+            # for testing purposes and debugging.
+            view.view_class = cls
+            view.view_class_instance = self
+            view.__name__ = name
+            view.__doc__ = cls.__doc__
+            view.__module__ = cls.__module__
+            view.methods = cls.methods
+
+            return view
+
+        pass
+
+    class WebSocketView(BaseView):
         __metaclass__ = ABCMeta
 
         def __init__(self):
@@ -370,37 +411,6 @@ class WebServerPlugin:
                     except:
                         pass
 
-        @classmethod
-        def as_view(cls, name, *class_args, **class_kwargs):
-            """
-            We override View's as_view method so we can construct the view class once
-            """
-
-            self = cls(*class_args, **class_kwargs)
-
-            def view(*args, **kwargs):
-                return self.dispatch_request(*args, **kwargs)
-
-            if cls.decorators:
-                view.__name__ = name
-                view.__module__ = cls.__module__
-                for decorator in cls.decorators:
-                    view = decorator(view)
-
-            # We attach the view class to the view function for two reasons:
-            # first of all it allows us to easily figure out what class-based
-            # view this thing came from, secondly it's also used for instantiating
-            # the view class so you can actually replace it with something else
-            # for testing purposes and debugging.
-            view.view_class = cls
-            view.view_class_instance = self
-            view.__name__ = name
-            view.__doc__ = cls.__doc__
-            view.__module__ = cls.__module__
-            view.methods = cls.methods
-
-            return view
-
 
 class RemoteControl(WebServerPlugin, EventLoopProcessor):
     """
@@ -413,7 +423,7 @@ class RemoteControl(WebServerPlugin, EventLoopProcessor):
     :param broadcast_interval: time between broadcasts of state updates in seconds
     """
 
-    def __init__(self, bot_driver, title='Robot Remote', locator=None, path_follower=None, broadcast_interval=0.250):
+    def __init__(self, bot_driver, title='Robot Remote', locator=None, path_finder=None, path_follower=None, broadcast_interval=0.250):
         WebServerPlugin.__init__(self)
         EventLoopProcessor.__init__(self)
         self.__title = title
@@ -421,6 +431,7 @@ class RemoteControl(WebServerPlugin, EventLoopProcessor):
             'api_remote',
             bot_driver=bot_driver,
             locator=locator,
+            path_finder=path_finder,
             path_follower=path_follower,
             broadcast_interval=broadcast_interval)
 
@@ -431,7 +442,7 @@ class RemoteControl(WebServerPlugin, EventLoopProcessor):
     def update(self):
         self.__api_view.view_class_instance.update()
 
-    class IndexView(View):
+    class IndexView(WebServerPlugin.BaseView):
         def __init__(self, title):
             self.__title = title
 
@@ -440,10 +451,11 @@ class RemoteControl(WebServerPlugin, EventLoopProcessor):
             return render_template('index.html', title=self.__title)
 
     class ApiView(WebServerPlugin.WebSocketView):
-        def __init__(self, bot_driver, locator, path_follower, broadcast_interval):
+        def __init__(self, bot_driver, locator, path_finder, path_follower, broadcast_interval):
             super(RemoteControl.ApiView, self).__init__()
             self.__bot_driver = bot_driver
             self.__locator = locator
+            self.__path_finder = path_finder
             self.__path_follower = path_follower
             self.__broadcast_interval = broadcast_interval
             self.__broadcast_time = None
@@ -471,6 +483,9 @@ class RemoteControl(WebServerPlugin, EventLoopProcessor):
             elif action == 'set_path':
                 if self.__path_follower is not None:
                     self.__path_follower.path = data['params']['path']
+            elif action == 'set_target':
+                if self.__path_finder is not None:
+                    self.__path_finder.target = data['params']['target']
 
         def update(self):
             now = time.time()
@@ -494,6 +509,17 @@ class RemoteControl(WebServerPlugin, EventLoopProcessor):
                 messages.append(json.dumps({
                     'action': 'path_update',
                     'path': self.__path_follower.path
+                }))
+
+            if self.__path_finder:
+                voxels = self.__path_finder.voxels
+                messages.append(json.dumps({
+                    'action': 'voxels_update',
+                    'voxels': {
+                        'offset': voxels.offset,
+                        'scale': voxels.scale,
+                        'grid': voxels.grid
+                    }
                 }))
 
             return messages
@@ -566,35 +592,38 @@ class DiffLocator(Locator, EventLoopProcessor):
                 theta_delta_rad = 0
             else:
                 # turn
-                turn_radius = self.__desc.axel_radius * float(right_pos_delta + left_pos_delta) / (right_pos_delta - left_pos_delta)
+                turn_radius = self.__desc.axel_radius * float(right_pos_delta + left_pos_delta) / (
+                    right_pos_delta - left_pos_delta)
                 left_pos_delta_rad = DEG_TO_RAD * left_pos_delta
                 right_pos_delta_rad = DEG_TO_RAD * right_pos_delta
                 if turn_radius == self.__desc.axel_radius:
-                    theta_delta_rad = self.__desc.wheel_radius * right_pos_delta_rad / (turn_radius + self.__desc.axel_radius)
+                    theta_delta_rad = self.__desc.wheel_radius * right_pos_delta_rad / (
+                        turn_radius + self.__desc.axel_radius)
                 else:
-                    theta_delta_rad = self.__desc.wheel_radius * left_pos_delta_rad / (turn_radius - self.__desc.axel_radius)
+                    theta_delta_rad = self.__desc.wheel_radius * left_pos_delta_rad / (
+                        turn_radius - self.__desc.axel_radius)
                 x_local = turn_radius * math.sin(theta_delta_rad)
                 y_local = turn_radius - turn_radius * math.cos(theta_delta_rad)
 
-            def matmult(a,b):
+            def matmult(a, b):
                 zip_b = zip(*b)
                 # uncomment next line if python 3 :
                 # zip_b = list(zip_b)
-                return [[sum(ele_a*ele_b for ele_a, ele_b in zip(row_a, col_b))
+                return [[sum(ele_a * ele_b for ele_a, ele_b in zip(row_a, col_b))
                          for col_b in zip_b] for row_a in a]
 
             prev_theta_rad = DEG_TO_RAD * prev_theta
 
-            v_local = [ [x_local], [y_local], [1.0] ]
+            v_local = [[x_local], [y_local], [1.0]]
             m_rotate = [
-                [ math.cos(prev_theta_rad), math.sin(prev_theta_rad), 0 ],
-                [ -math.sin(prev_theta_rad), math.cos(prev_theta_rad), 0 ],
-                [ 0, 0, 1.0 ]
+                [math.cos(prev_theta_rad), math.sin(prev_theta_rad), 0],
+                [-math.sin(prev_theta_rad), math.cos(prev_theta_rad), 0],
+                [0, 0, 1.0]
             ]
             m_translate = [
-                [ 1.0, 0, prev_x ],
-                [ 0, 1.0, prev_y ],
-                [ 0, 0, 1.0 ]
+                [1.0, 0, prev_x],
+                [0, 1.0, prev_y],
+                [0, 0, 1.0]
             ]
 
             v_world = matmult(m_translate, matmult(m_rotate, v_local))
@@ -662,7 +691,8 @@ class PathFollower(EventLoopProcessor):
     :param distance_tolerance: minimum distance from the target location
     """
 
-    def __init__(self, bot_driver, locator, distance_tolerance=0.05, heading_tolerance=10, forward_power=50, turn_power=30):
+    def __init__(self, bot_driver, locator, distance_tolerance=0.05, heading_tolerance=10, forward_power=50,
+                 turn_power=30):
         super(PathFollower, self).__init__()
         self.__bot_driver = bot_driver
         self.__locator = locator
@@ -696,7 +726,7 @@ class PathFollower(EventLoopProcessor):
                 dx = x_dest - x
                 dy = y_dest - y
 
-                dist = math.sqrt(dx*dx + dy*dy)
+                dist = math.sqrt(dx * dx + dy * dy)
 
                 if dist < self.__distance_tolerance:
                     print 'destination reached: ', (x_dest, y_dest)
@@ -725,3 +755,155 @@ class PathFollower(EventLoopProcessor):
                 else:
                     # drive forward
                     self.__bot_driver.drive(power=self.__forward_power)
+
+
+import os
+
+
+class ConfigServer(WebServerPlugin):
+    """
+    Serves an opaque config blob to external clients
+    """
+
+    CONFIG_BLOB_FILENAME = 'bot_config.blob'
+
+    def __init__(self, storage_folder='/tmp'):
+        super(ConfigServer, self).__init__()
+        self.__storage_folder = storage_folder
+
+    def configure(self, app):
+        app.add_url_rule('/config/blob', view_func=ConfigServer.ConfigBlobView.as_view(
+            'config_blob',
+            storage_folder=self.__storage_folder
+        ))
+
+    class ConfigBlobView(WebServerPlugin.BaseView):
+        methods = ['GET', 'POST']
+
+        def __init__(self, storage_folder):
+            self.__storage_folder = storage_folder
+
+        def dispatch_request(self):
+            if request.method == 'GET':
+                resp = send_from_directory(self.__storage_folder, ConfigServer.CONFIG_BLOB_FILENAME)
+                resp.headers['Access-Control-Allow-Origin'] = '*'
+                return resp
+            else:
+                f = request.files['file']
+                f.save(os.path.join(self.__storage_folder, ConfigServer.CONFIG_BLOB_FILENAME), buffer_size=20*1024*1024)
+                return 'Upload successful'
+
+
+class PathFinder:
+    """
+    Generates a path to a target location
+
+    :param path_changed_handler: callback function invoked when the path to the target changes
+    """
+
+    __metaclass__ = ABCMeta
+
+    def __init__(self, path_changed_handler):
+        pass
+
+    @property
+    @abstractmethod
+    def target(self):
+        """
+        Current target location as an (x, y) tuple
+        """
+        pass
+
+    @target.setter
+    @abstractmethod
+    def target(self, target):
+        pass
+
+    @property
+    @abstractmethod
+    def voxels(self):
+        """
+        Current voxel map as a `VoxelMap` instance
+        """
+        pass
+
+    class VoxelMap:
+        """
+        Represents a voxel map that was used to compute a given path
+        """
+        offset = [0, 0]
+        scale = 0
+        grid = [[]]
+
+        def __init__(self):
+            pass
+
+
+class RemotePathFinder(PathFinder, WebServerPlugin):
+    def __init__(self, path_changed_handler):
+        self.__voxels = PathFinder.VoxelMap()
+        self.__api_view = RemotePathFinder.ApiView.as_view('api_pathfinder', path_changed_handler=path_changed_handler)
+
+    @property
+    def target(self):
+        return self.__api_view.view_class_instance.target
+
+    @target.setter
+    def target(self, target):
+        self.__api_view.view_class_instance.target = target
+
+    @property
+    def voxels(self):
+        return self.__api_view.view_class_instance.voxels
+
+    def configure(self, app):
+        app.add_url_rule('/api/pathfinder', view_func=self.__api_view)
+
+    class ApiView(WebServerPlugin.WebSocketView):
+        def __init__(self, path_changed_handler):
+            super(RemotePathFinder.ApiView, self).__init__()
+            self.__path_changed_handler = path_changed_handler
+            self.__target = None
+            self.__path = []
+            self.__voxels = PathFinder.VoxelMap()
+
+        @property
+        def target(self):
+            return self.__target
+
+        @target.setter
+        def target(self, target):
+            self.__target = target
+            self.broadcast(json.dumps({ 'action': 'set_target', 'params': { 'target': target } }))
+
+        @property
+        def voxels(self):
+            return self.__voxels
+
+        def connected(self, ws):
+            ws.send(json.dumps({ 'action': 'set_target', 'params': { 'target': self.__target } }))
+
+        def message_recv(self, ws, message):
+            data = json.loads(message)
+
+            if not data or not 'action' in data:
+                return
+
+            action = data['action']
+
+            if action == 'set_path':
+
+                path = data['params']['path']
+                voxels = PathFinder.VoxelMap()
+
+                if 'voxels' in data['params']:
+                    data_voxels = data['params']['voxels']
+                    voxels.offset = data_voxels['offset']
+                    voxels.scale = data_voxels['scale']
+                    voxels.grid = data_voxels['grid']
+
+                self.__voxels = voxels
+
+                if self.__path != path:
+                    self.__path = path
+                    self.__path_changed_handler(path, voxels)

@@ -6,6 +6,7 @@ DiffDrive robot example
 from PiStorms import PiStorms
 import bot
 import requests
+import time
 
 psm = PiStorms()
 
@@ -20,12 +21,27 @@ desc = bot.DiffDescription(
 driver = bot.DiffDriver(desc)
 #locator = bot.DiffLocator(desc)
 locator = bot.RemoteLocator()
+
 path_follower = bot.PathFollower(driver, locator)
-remote = bot.RemoteControl(driver, title='Minion Remote', locator=locator, path_follower=path_follower)
+
+
+def path_changed_handler(path, voxels):
+    path_follower.path = path
+
+path_finder = bot.RemotePathFinder(path_changed_handler)
+
+remote = bot.RemoteControl(
+    bot_driver=driver,
+    title='Minion Remote',
+    locator=locator,
+    path_finder=path_finder,
+    path_follower=path_follower)
 
 server = bot.WebServer(9000, screen=psm.screen, plugins=(
     remote,
     locator,
+    bot.ConfigServer(),
+    path_finder,
 ))
 server.run(async=True)
 
@@ -54,6 +70,7 @@ while True:
     if psm.isKeyPressed():
         break
     event_loop.step()
+    time.sleep(0.001)
 
 driver.float()
 
