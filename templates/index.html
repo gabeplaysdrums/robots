@@ -8,6 +8,10 @@
     #canvas {
       border: 1px solid black;
     }
+
+    #turn_radius {
+      width: 600px;
+    }
   </style>
   <script type="text/javascript">
 
@@ -69,6 +73,16 @@
         {
             var power = parseInt($("#power").val());
             var brake = $("#brake:checked").length > 0;
+            var turnRadius = parseFloat($("#turn_radius").val());
+
+            if (turnRadius < 0)
+            {
+                turnRadius = -1.05 - turnRadius;
+            }
+            else if (turnRadius > 0)
+            {
+                turnRadius = 1.05 - turnRadius;
+            }
 
             if (keyState[37] || keyState[65]) // left arrow or a
             {
@@ -80,11 +94,11 @@
             }
             else if (keyState[38] || keyState[87]) // up arrow or w
             {
-                sendAction("drive", { power: power });
+                sendAction("drive", { power: power, turn_radius: turnRadius });
             }
             else if (keyState[40] || keyState[83]) // down arrow or s
             {
-                sendAction("drive", { power: -power });
+                sendAction("drive", { power: -power, turn_radius: turnRadius });
             }
             else if (!brake)
             {
@@ -112,9 +126,16 @@
             update();
         });
 
+        $("#turn_radius").mouseup(function(event) {
+            $(this).val(0);
+        });
+
         $("#clear_path").click(function() {
-            sendAction("set_path", { path: [] });
-            path = []
+            if ($("#enable_path_edit:checked").length > 0)
+            {
+                sendAction("set_path", { path: [] });
+                path = []
+            }
         });
 
         var PIXELS_PER_METER = 100;
@@ -123,19 +144,22 @@
 
         $("#canvas").click(function(event) {
 
-            var x = (event.pageX - $(this).offset().left - canvas.width / 2) / PIXELS_PER_METER;
-            var y = (canvas.height / 2 - (event.pageY - $(this).offset().top)) / PIXELS_PER_METER;
+            if ($("#enable_path_edit:checked").length > 0)
+            {
+                var x = (event.pageX - $(this).offset().left - canvas.width / 2) / PIXELS_PER_METER;
+                var y = (canvas.height / 2 - (event.pageY - $(this).offset().top)) / PIXELS_PER_METER;
 
-            if ($("#set_target:checked").length > 0)
-            {
-                // set target location for path finder
-                sendAction("set_target", { target: [ x, y ] });
-            }
-            else
-            {
-                // append to existing path
-                path.push([x, y]);
-                sendAction("set_path", { path: path });
+                if ($("#set_target:checked").length > 0)
+                {
+                    // set target location for path finder
+                    sendAction("set_target", { target: [ x, y ] });
+                }
+                else
+                {
+                    // append to existing path
+                    path.push([x, y]);
+                    sendAction("set_path", { path: path });
+                }
             }
 
         });
@@ -225,9 +249,13 @@
     Power: <input type="range" id="power" min="0" max="100" step="" value="30" />
   </p>
   <p>
+    Turn Radius: <input type="range" id="turn_radius" min="-1.0" max="1.0" step="0.05" value="0" />
+  </p>
+  <p>
     <input id="brake" type="checkbox" checked /><label for="brake">Brake</label>
   </p>
   <p>
+    <input id="enable_path_edit" type="checkbox" /><label for="enable_path_edit">Enable path edit</label>
     <input id="clear_path" type="button" value="Clear Path" />
     <input id="set_target" type="checkbox" /><label for="set_target">Set target location on click</label>
   </p>

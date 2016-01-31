@@ -110,95 +110,109 @@ class DiffDriver(BotDriver):
     def __init__(self, desc):
         super(DiffDriver, self).__init__()
         self.__desc = desc
+        self.__lock = threading.Lock()
 
     def drive(self, power=30, distance=None, turn_radius=0, wait=True):
-        if turn_radius == 0:
-            if distance is None:
-                self.__desc.left_motor.setSpeed(self.__power_to_speed(power))
-                self.__desc.right_motor.setSpeed(self.__power_to_speed(power))
+        with self.__lock:
+            # for calculation purposes, distance should always be positive and power can be positive or negative
+            if distance is not None and distance < 0:
+                distance = -distance
+                power = -power
+
+            if turn_radius == 0:
+                if distance is None:
+                    self.__desc.left_motor.setSpeed(self.__power_to_speed(power))
+                    self.__desc.right_motor.setSpeed(self.__power_to_speed(power))
+                else:
+                    self.__desc.left_motor.runDegs(
+                        int(RAD_TO_DEG * distance / self.__desc.wheel_radius),
+                        self.__power_to_speed(power),
+                        True,
+                        True
+                    )
+                    self.__desc.right_motor.runDegs(
+                        int(RAD_TO_DEG * distance / self.__desc.wheel_radius),
+                        self.__power_to_speed(power),
+                        True,
+                        True
+                    )
+
+                    if wait:
+                        self.__desc.left_motor.waitUntilNotBusy()
+                        self.__desc.right_motor.waitUntilNotBusy()
+                return
+
+            if turn_radius < 0:
+                inner_motor = self.__desc.left_motor
+                outer_motor = self.__desc.right_motor
+                turn_radius = -turn_radius
             else:
-                self.__desc.left_motor.runDegs(
-                    int(self.__desc.forward_coeff * RAD_TO_DEG * distance / self.__desc.wheel_radius),
-                    self.__power_to_speed(power),
-                    True,
-                    True
-                )
-                self.__desc.right_motor.runDegs(
-                    int(self.__desc.forward_coeff * RAD_TO_DEG * distance / self.__desc.wheel_radius),
-                    self.__power_to_speed(power),
-                    True,
-                    True
-                )
+                inner_motor = self.__desc.right_motor
+                outer_motor = self.__desc.left_motor
+
+            outer_speed = self.__desc.forward_coeff * (turn_radius + self.__desc.axel_radius) * power / turn_radius
+            inner_speed = self.__desc.forward_coeff * (turn_radius - self.__desc.axel_radius) * power / turn_radius
+
+            scale = min(1.0, 100 / max(abs(outer_speed), abs(inner_speed)))
+
+            outer_speed *= scale
+            inner_speed *= scale
+
+            if distance is None:
+                outer_motor.setSpeed(outer_speed)
+                inner_motor.setSpeed(inner_speed)
+            else:
+                outer_degs = self.__desc.forward_coeff * RAD_TO_DEG * (turn_radius + self.__desc.axel_radius) * distance / \
+                             (self.__desc.wheel_radius * turn_radius)
+                inner_degs = self.__desc.forward_coeff * RAD_TO_DEG * (turn_radius - self.__desc.axel_radius) * distance / \
+                             (self.__desc.wheel_radius * turn_radius)
+                outer_motor.runDegs(int(outer_degs), outer_speed, True, False)
+                inner_motor.runDegs(int(inner_degs), inner_speed, True, False)
 
                 if wait:
                     self.__desc.left_motor.waitUntilNotBusy()
                     self.__desc.right_motor.waitUntilNotBusy()
-            return
-
-        if turn_radius < 0:
-            inner_motor = self.__desc.left_motor
-            outer_motor = self.__desc.right_motor
-            turn_radius = -turn_radius
-        else:
-            inner_motor = self.__desc.right_motor
-            outer_motor = self.__desc.left_motor
-
-        outer_speed = (turn_radius + self.__desc.axel_radius) * power / turn_radius
-        inner_speed = (turn_radius - self.__desc.axel_radius) * power / turn_radius
-
-        scale = min(1.0, 100 / max(abs(outer_speed), abs(inner_speed)))
-
-        outer_speed *= scale
-        inner_speed *= scale
-
-        if distance is None:
-            outer_motor.setSpeed(outer_speed)
-            inner_motor.setSpeed(inner_speed)
-        else:
-            outer_degs = self.__desc.forward_coeff * RAD_TO_DEG * (turn_radius + self.__desc.axel_radius) * distance / \
-                         (self.__desc.wheel_radius * turn_radius)
-            inner_degs = self.__desc.forward_coeff * RAD_TO_DEG * (turn_radius - self.__desc.axel_radius) * distance / \
-                         (self.__desc.wheel_radius * turn_radius)
-            outer_motor.runDegs(int(outer_degs), outer_speed, True, False)
-            inner_motor.runDegs(int(inner_degs), inner_speed, True, False)
-
-            if wait:
-                self.__desc.left_motor.waitUntilNotBusy()
-                self.__desc.right_motor.waitUntilNotBusy()
 
     def turn_in_place(self, power=30, degrees=None, wait=True):
-        if degrees is None:
-            self.__desc.left_motor.setSpeed(self.__power_to_speed(power))
-            self.__desc.right_motor.setSpeed(self.__power_to_speed(-power))
-        else:
-            motor_degrees = int(self.__desc.axel_radius * degrees / self.__desc.wheel_radius)
-            self.__desc.left_motor.runDegs(self.__desc.forward_coeff * motor_degrees, self.__power_to_speed(power),
-                                           True, True)
-            self.__desc.right_motor.runDegs(self.__desc.forward_coeff * -motor_degrees, self.__power_to_speed(power),
-                                            True, True)
+        with self.__lock:
+            if degrees is None:
+                self.__desc.left_motor.setSpeed(self.__power_to_speed(power))
+                self.__desc.right_motor.setSpeed(self.__power_to_speed(-power))
+            else:
+                motor_degrees = int(self.__desc.axel_radius * degrees / self.__desc.wheel_radius)
+                self.__desc.left_motor.runDegs(self.__desc.forward_coeff * motor_degrees, self.__power_to_speed(power),
+                                               True, True)
+                self.__desc.right_motor.runDegs(self.__desc.forward_coeff * -motor_degrees, self.__power_to_speed(power),
+                                                True, True)
 
-            if wait:
-                self.__desc.left_motor.waitUntilNotBusy()
-                self.__desc.right_motor.waitUntilNotBusy()
+                if wait:
+                    self.__desc.left_motor.waitUntilNotBusy()
+                    self.__desc.right_motor.waitUntilNotBusy()
 
     def stop(self):
-        self.brake()
-        time.sleep(0.250)
-        self.float()
+        with self.__lock:
+            self.__desc.left_motor.brake()
+            self.__desc.right_motor.brake()
+            time.sleep(0.250)
+            self.__desc.left_motor.float()
+            self.__desc.right_motor.float()
 
     def brake(self):
-        self.__desc.left_motor.brake()
-        self.__desc.right_motor.brake()
+        with self.__lock:
+            self.__desc.left_motor.brake()
+            self.__desc.right_motor.brake()
 
     def float(self):
-        self.__desc.left_motor.float()
-        self.__desc.right_motor.float()
+        with self.__lock:
+            self.__desc.left_motor.float()
+            self.__desc.right_motor.float()
 
     def hold(self):
-        self.__desc.left_motor.waitUntilNotBusy()
-        self.__desc.right_motor.waitUntilNotBusy()
-        self.__desc.left_motor.hold()
-        self.__desc.right_motor.hold()
+        with self.__lock:
+            self.__desc.left_motor.waitUntilNotBusy()
+            self.__desc.right_motor.waitUntilNotBusy()
+            self.__desc.left_motor.hold()
+            self.__desc.right_motor.hold()
 
     def __power_to_speed(self, power):
         power *= self.__desc.forward_coeff
@@ -471,21 +485,26 @@ class RemoteControl(WebServerPlugin, EventLoopProcessor):
                 return
 
             action = data['action']
+            params = data['params'] if 'params' in data else None
 
             if action == 'drive':
-                self.__bot_driver.drive(power=data['params']['power'], wait=False)
+                print message
+                self.__bot_driver.drive(
+                    power=params['power'],
+                    turn_radius=params['turn_radius'] if 'turn_radius' in params else 0,
+                    wait=False)
             elif action == 'turn_in_place':
-                self.__bot_driver.turn_in_place(power=data['params']['power'], wait=False)
+                self.__bot_driver.turn_in_place(power=params['power'], wait=False)
             elif action == 'stop':
                 self.__bot_driver.stop()
             elif action == 'float':
                 self.__bot_driver.float()
             elif action == 'set_path':
                 if self.__path_follower is not None:
-                    self.__path_follower.path = data['params']['path']
+                    self.__path_follower.path = params['path']
             elif action == 'set_target':
                 if self.__path_finder is not None:
-                    self.__path_finder.target = data['params']['target']
+                    self.__path_finder.target = params['target']
 
         def update(self):
             now = time.time()
