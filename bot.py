@@ -715,7 +715,6 @@ class PathFollower(EventLoopProcessor):
     :param max_drive_power: max power while driving forward
     :param drive_accel: forward acceleration in power units per second
     :param deccel_distance: distance to start decelerating in meters
-    :param turn_power: power while turning in place
     :param correction_distance: correction distance in meters.  While driving, robot will attempt to get back on the
         path within this distance.
     """
