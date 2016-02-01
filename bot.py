@@ -488,7 +488,6 @@ class RemoteControl(WebServerPlugin, EventLoopProcessor):
             params = data['params'] if 'params' in data else None
 
             if action == 'drive':
-                print message
                 self.__bot_driver.drive(
                     power=params['power'],
                     turn_radius=params['turn_radius'] if 'turn_radius' in params else 0,
@@ -586,7 +585,6 @@ class DiffLocator(Locator, EventLoopProcessor):
     def locate(self):
         return self.__pose, self.__confidence
 
-    @staticmethod
     def update(self):
 
         # get previous values
@@ -604,6 +602,8 @@ class DiffLocator(Locator, EventLoopProcessor):
 
         if not (left_pos_delta == 0 and right_pos_delta == 0):
 
+            print dict(left_pos_delta=left_pos_delta, right_pos_delta=right_pos_delta)
+
             if left_pos_delta == right_pos_delta:
                 # straight
                 x_local = DEG_TO_RAD * left_pos_delta * self.__desc.wheel_radius
@@ -615,14 +615,15 @@ class DiffLocator(Locator, EventLoopProcessor):
                     right_pos_delta - left_pos_delta)
                 left_pos_delta_rad = DEG_TO_RAD * left_pos_delta
                 right_pos_delta_rad = DEG_TO_RAD * right_pos_delta
-                if turn_radius == self.__desc.axel_radius:
-                    theta_delta_rad = self.__desc.wheel_radius * right_pos_delta_rad / (
+                if abs(self.__desc.axel_radius + turn_radius) > 0.00001:
+                    gamma = self.__desc.wheel_radius * right_pos_delta_rad / (
                         turn_radius + self.__desc.axel_radius)
                 else:
-                    theta_delta_rad = self.__desc.wheel_radius * left_pos_delta_rad / (
+                    gamma = self.__desc.wheel_radius * left_pos_delta_rad / (
                         turn_radius - self.__desc.axel_radius)
-                x_local = turn_radius * math.sin(theta_delta_rad)
-                y_local = turn_radius - turn_radius * math.cos(theta_delta_rad)
+                x_local = turn_radius * math.sin(gamma)
+                y_local = turn_radius - turn_radius * math.cos(gamma)
+                theta_delta_rad = gamma
 
             def matmult(a, b):
                 zip_b = zip(*b)
@@ -635,8 +636,8 @@ class DiffLocator(Locator, EventLoopProcessor):
 
             v_local = [[x_local], [y_local], [1.0]]
             m_rotate = [
-                [math.cos(prev_theta_rad), math.sin(prev_theta_rad), 0],
-                [-math.sin(prev_theta_rad), math.cos(prev_theta_rad), 0],
+                [math.cos(-prev_theta_rad), math.sin(-prev_theta_rad), 0],
+                [-math.sin(-prev_theta_rad), math.cos(-prev_theta_rad), 0],
                 [0, 0, 1.0]
             ]
             m_translate = [
@@ -708,17 +709,39 @@ class PathFollower(EventLoopProcessor):
     :param bot_driver: drive control for the robot
     :param locator: locator that determines the robot's pose
     :param distance_tolerance: minimum distance from the target location
+    :param heading_tolerance: threshold for magnitude of heading difference.  Below the threshold, the robot will
+        attempt to correct heading error while driving.  Above the threshold, it will turn in place.
+    :param min_drive_power: min power while driving forward
+    :param max_drive_power: max power while driving forward
+    :param drive_accel: forward acceleration in power units per second
+    :param deccel_distance: distance to start decelerating in meters
+    :param turn_power: power while turning in place
+    :param correction_distance: correction distance in meters.  While driving, robot will attempt to get back on the
+        path within this distance.
     """
 
-    def __init__(self, bot_driver, locator, distance_tolerance=0.05, heading_tolerance=10, forward_power=50,
-                 turn_power=30):
+    def __init__(self,
+                 bot_driver,
+                 locator,
+                 distance_tolerance=0.05,
+                 heading_tolerance=45,
+                 min_drive_power=20,
+                 max_drive_power=80,
+                 drive_accel=15,
+                 deccel_distance=1.0,
+                 correction_distance=0.05):
         super(PathFollower, self).__init__()
         self.__bot_driver = bot_driver
         self.__locator = locator
         self.__distance_tolerance = distance_tolerance
         self.__heading_tolerance = heading_tolerance
-        self.__forward_power = forward_power
-        self.__turn_power = turn_power
+        self.__min_drive_power = min_drive_power
+        self.__max_drive_power = max_drive_power
+        self.__drive_accel = drive_accel
+        self.__deccel_distance = deccel_distance
+        self.__correction_distance = correction_distance
+        self.__update_time = None
+        self.__drive_power = None
         self.__path = []
         self.__lock = threading.Lock()
 
@@ -736,6 +759,11 @@ class PathFollower(EventLoopProcessor):
         with self.__lock:
             print 'new path: ', path
             self.__path = path
+            self.__update_time = None
+
+            # if no path, stop driving
+            if not self.__path:
+                self.__bot_driver.float()
 
     def update(self):
         with self.__lock:
@@ -750,8 +778,8 @@ class PathFollower(EventLoopProcessor):
                 if dist < self.__distance_tolerance:
                     print 'destination reached: ', (x_dest, y_dest)
                     self.__bot_driver.float()
-                    time.sleep(0.250)
                     del self.__path[0]
+                    self.__update_time = None
                     return
 
                 theta_dest = RAD_TO_DEG * math.atan2(dy, dx)
@@ -765,15 +793,43 @@ class PathFollower(EventLoopProcessor):
 
                 dtheta = canonical_angle(canonical_angle(theta_dest) - canonical_angle(theta))
 
+                # compute drive power
+                now = time.time()
+
+                if self.__update_time is None:
+                    self.__update_time = now
+                    self.__drive_power = self.__min_drive_power
+                else:
+                    elapsed = now - self.__update_time
+                    self.__update_time = now
+
+                    if dist < self.__deccel_distance:
+                        max_power = self.__min_drive_power + \
+                            dist / self.__deccel_distance * (self.__max_drive_power - self.__min_drive_power)
+                        self.__drive_power = min(self.__drive_power, max_power)
+                        self.__drive_power = max(self.__min_drive_power, self.__drive_power)
+                    else:
+                        power_delta = self.__drive_accel * elapsed
+                        self.__drive_power += power_delta
+                        self.__drive_power = min(self.__max_drive_power, self.__drive_power)
+
                 if dtheta < -self.__heading_tolerance:
                     # turn right
-                    self.__bot_driver.turn_in_place(power=self.__turn_power)
+                    self.__bot_driver.turn_in_place(power=self.__drive_power)
                 elif dtheta > self.__heading_tolerance:
                     # turn left
-                    self.__bot_driver.turn_in_place(power=-self.__turn_power)
+                    self.__bot_driver.turn_in_place(power=-self.__drive_power)
                 else:
                     # drive forward
-                    self.__bot_driver.drive(power=self.__forward_power)
+
+                    # compute turn radius
+                    if dtheta == 0:
+                        turn_radius = 0
+                    else:
+                        turn_radius = -self.__correction_distance / (2 * math.sin(DEG_TO_RAD * dtheta))
+
+                    # drive
+                    self.__bot_driver.drive(power=int(self.__drive_power), turn_radius=turn_radius)
 
 
 import os

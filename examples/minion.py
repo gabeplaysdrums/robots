@@ -73,12 +73,13 @@ def switchboard_register():
     else:
         psm.screen.termPrintln('failed to register')
 
-#switchboard_register()
+switchboard_register()
 
 
 print 'starting event loop'
 
 event_loop = bot.EventLoop(processors=(
+    #locator,
     FrontBumperProcessor(driver),
     remote,
     path_follower,
